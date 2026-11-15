@@ -1,0 +1,467 @@
+---
+title: "Dune Crew Spectral Diversity Anaylsis_1"
+author: "Rosaleen Hernandez"
+date: "2026-10-22"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, packages, results = 'hide', warning = FALSE, message = FALSE}
+library(readxl)
+library(tidyverse)
+library(pracma)
+library(lme4)
+library(modelsummary)
+library(marginaleffects)
+library(patchwork)
+library(ggrepel)
+```
+
+The purpose of this research is to utilize Marzialetti et. al paper of "Measuring Alpha and Beta Diversity by Field and Remote-Sensing Data: A Challenge for Coastal Dunes Biodiversity Monitoring" to better understand whether remote-sensing data can be utilized for biodiversity monitoring in dune habitats on multiple scales including: between plot, within plot, and across sites.
+
+# Replicating the Paper's Process
+
+Benjamin Rivera conducted a study for testing the Stress Gradient Hypothesis among three different dune sites: Guadalupe-Nipomo National Wildlife Refuge (GuNi), Zmudowski Beach State Park (Zmud) and MacKerricher State Park's Ten Mile Beach (TeMi). Each site consisted of 2 hectares with fifty 2 x 2 meter quadrants.
+
+Utilizing satellite data, we used ArcGIS Pro to extract the light band values for each site and each individual plot. We converted the raster values into points before clipping the sites from a pdf. Then, we created new points for each individual plot within the sites. Zonal characteristics gave us the nearest spectral band value from the raster for each plot. Each raster values per plot will help us compare the biodiversity as plants reflect and absorb different lights. If there is lots of reflected light, that means there is a lot of biodiversity or plants present at the site. We can then compare the sites and plots to see how similar they are.
+
+```{r, loading excels}
+Zmud_plots <- read_excel("~/ArcGIS/Projects/DuneCrew/ZonalCh_Zmud_plots_TableToExcel.xlsx") %>% 
+  select(plotID, nir_MEAN, rededge_MEAN, red_MEAN, yellow_MEAN, green_i_MEAN, green_MEAN, blue_MEAN, coastal_blue_MEAN)  %>% 
+  mutate(Site = c("Zmud"))
+
+TeMi_plots <- read_excel("~/ArcGIS/Projects/DuneCrew/ZonalCh_TeMi_plots_TableToExcel.xlsx") %>% 
+  select(OBJECTID, nir_TeMi_MEAN, rededge_TeMi_MEAN, red_TeMi_MEAN, yellow_TeMi_MEAN, green_i_TeMi_MEAN, green_TeMi_MEAN, blue_TeMi_MEAN, coastal_blue_TeMi_MEAN) %>% 
+  rename(plotID = OBJECTID,
+         nir_MEAN = nir_TeMi_MEAN,
+         rededge_MEAN = rededge_TeMi_MEAN,
+         red_MEAN = red_TeMi_MEAN,
+         yellow_MEAN = yellow_TeMi_MEAN,
+         green_i_MEAN = green_i_TeMi_MEAN,
+         green_MEAN = green_TeMi_MEAN,
+         blue_MEAN = blue_TeMi_MEAN,
+         coastal_blue_MEAN = coastal_blue_TeMi_MEAN) %>% 
+  mutate(Site = c("TeMi"))
+
+GuNi_plots <- read_excel("~/ArcGIS/Projects/DuneCrew/ZonalCh_GuNi_plots_TableToExcel.xlsx") %>% 
+  select(OBJECTID, nir_MEAN, rededge_MEAN, red_MEAN, yellow_MEAN, green_i_MEAN, green_MEAN, blue_MEAN, coastal_blue_MEAN) %>% 
+  rename(plotID = OBJECTID) %>% 
+  mutate(Site = "GuNi")
+
+```
+
+```{r, within plot}
+# This data set was provide by B. Rivera
+within_plot <- read.csv("~/docs_DuneCrew/WithinPlotDissim_19OCT2026.csv") %>% select(-X.1) %>% 
+  rename(plotID = Plot)
+```
+
+## Creating Data for recreating Paper
+
+In order to recreate the Marzialetti et. al paper, we scaled out data prior to running the PCA due to us having three individual sites and scaling later in the process would distort the importance of site. However, scaling prior to running the PCA caused negative values to appear in our data which resulted in missing values. We added ten to all the values after scaling to remedy this. Then, we combined all the datasets together into one big data frame named "sites".
+
+```{r}
+# Adding 10 to remove the NA values we receive otherwise
+Zmud_plots[,2:9]<- scale(Zmud_plots[,2:9]) +10
+GuNi_plots[,2:9]<- scale(GuNi_plots[,2:9]) +10
+TeMi_plots[,2:9]<- scale(TeMi_plots[,2:9]) +10
+
+ # dim(subset(within_plot, Site == "Zmud"))
+
+Zmud_plots <- subset(Zmud_plots, Zmud_plots$plotID %in% subset(within_plot, Site == "Zmud")$plotID )
+GuNi_plots <- subset(GuNi_plots, GuNi_plots$plotID %in% subset(within_plot, Site == "GuNi")$plotID )
+TeMi_plots <- subset(TeMi_plots, TeMi_plots$plotID %in% subset(within_plot, Site == "TeMi")$plotID )
+
+
+sites <- rbind(Zmud_plots, TeMi_plots, GuNi_plots) 
+
+write.csv(sites, "sites.csv")
+
+```
+
+In the original paper, they ran a PCA with the spectral bands of blue, green, red, and near infrared. In addition to those four spectral bands, they also had spectral indices of modified soil adjusted vegetation index 2 (MSAVI2) and coloration index (CI). We calculated these columns.
+
+```{r, calculating new columns}
+sites$msavi2 <- 2*sites$nir_MEAN + 1 - sqrt((2*sites$nir_MEAN + 1)^2 - 8*(sites$nir_MEAN - sites$red_MEAN)) / 2
+
+sites$ci <- (sites$red_MEAN - sites$green_MEAN) / (sites$red_MEAN + sites$green_MEAN)
+
+numbers_only <- mutate(sites,
+                       site_numeric = as.numeric(as.factor(Site))) %>% 
+  select(site_numeric, plotID, blue_MEAN, green_MEAN, red_MEAN, nir_MEAN, msavi2, ci)
+
+write.csv(numbers_only, "Sites_Marzialetti.csv")
+```
+
+The sites were changed to numeric values in order to run the PCA.
+
+## PCA
+
+```{r}
+pca <- prcomp(as.matrix(numbers_only[,3:8]), scale = FALSE)
+summary(pca)
+plot(pca$sdev^2, type = "b", xlab = "Principal Component") 
+```
+
+The purpose of a scree plot helps tell us how many components to keep within the analysis. The break in the elbow is where the components were not as influential in explaining. Here the break is at two components which means after adding two components, the additional components do not fully add more explaination.
+
+```{r}
+biplot(pca, scale = 0)
+```
+
+## Distance
+
+```{r, distance math}
+center_coords <- matrix(c(
+  0, 0),
+  nrow = 107, ncol = 2, byrow = TRUE)
+
+plot_spec_coords <- matrix(c(pca$x[,1], pca$x[,2]),
+                   nrow = 107, ncol = 2, byrow = TRUE)
+
+euc_dist <- sqrt(pca$x[,1]^2 + pca$x[,2]^2)
+
+```
+
+We calculated the euclidean distance from the center of the PCA and joined them to the within_plot data base in order to run linear mixed-effects model with Shannon Diversity, Inverse Simpson index and also the dissimilarity of the plots.
+
+```{r}
+
+within_plot$EucDist <- euc_dist
+
+write.csv(within_plot, "Within_plot2.csv")
+
+```
+
+## Models
+
+Creating null models in order to compare how well Euclidean Distance is as a predictor with Site as a random effect since we scaled for Site already and are more intestered in **only** Eucludiean Distance
+
+### Null Models
+```{r}
+rich_null <- lmer(Richness ~ 1 + (1|Site),
+             data = within_plot)
+
+
+shannon_null <- lmer(ShanDiv ~ 1 + (1|Site),
+             data = within_plot)
+
+Simp_null <- lmer(InvSimp ~ 1 + (1|Site),
+             data = within_plot)
+
+Dissim_null <- lmer(Dissimilarity ~ 1 + (1|Site),
+             data = within_plot)
+
+
+```
+
+### Random Effect
+
+```{r}
+shannon_model <- lmer(ShanDiv ~ EucDist + (1|Site),
+                      data = within_plot)
+modelsummary(shannon_model)
+```
+
+
+```{r}
+simpson_model <- lmer(InvSimp ~ EucDist + (1|Site),
+                      data = within_plot)
+modelsummary(simpson_model)
+```
+
+```{r}
+dissimilarity_model <- lmer(Dissimilarity ~ EucDist + (1|Site),
+                            data = within_plot)
+
+modelsummary(dissimilarity_model)
+```
+
+```{r}
+richness <- lmer(Richness ~ EucDist + (1|Site),
+                                       data = within_plot)
+
+modelsummary(richness)
+```
+
+```{r}
+options(marginaleffects_safe = FALSE)
+p1 <- plot_predictions(shannon_model,
+                 condition = c("EucDist", "Site"),
+                 points = 0.5)
+
+p2 <- plot_predictions(simpson_model,
+                 condition = c("EucDist", "Site"),
+                 points = 0.5)
+
+p3 <- plot_predictions(dissimilarity_model,
+                       condition = c("EucDist", "Site"),
+                       point = 0.5)
+p4 <- plot_predictions(richness,
+                       condition = c("EucDist", "Site"),
+                       points = 0.5)
+
+p1
+p2
+p3
+p4
+```
+
+```{r}
+ggplot(within_plot, aes(x = Site, y = ShanDiv))+
+   geom_violin()+
+   stat_summary()
+
+ggplot(within_plot, aes(x = Site, y = Richness))+
+   geom_violin()+
+   stat_summary()
+
+ggplot(within_plot, aes(x = Site, y = InvSimp))+
+   geom_violin()+
+   stat_summary()
+
+ggplot(within_plot, aes(x = Site, y = Dissimilarity))+
+   geom_violin()+
+   stat_summary()
+
+
+anova(lm(Richness ~ Site, data = within_plot))
+anova(lm(ShanDiv ~ Site, data = within_plot))
+anova(lm(InvSimp ~ Site, data = within_plot))
+anova(lm(Dissimilarity ~ Site, data = within_plot))
+```
+
+
+### Interaction
+
+```{r}
+shan.lm <- lm(ShanDiv ~ EucDist*Site, data = within_plot)
+summary(shan.lm)
+anova(shan.lm)
+```
+
+
+```{r}
+simp.lm <-lm(InvSimp ~ EucDist*Site, data = within_plot)
+summary(simp.lm)
+anova(simp.lm)
+
+```
+
+```{r}
+Rich.lm<-lm(Richness ~ EucDist*Site, data = within_plot)
+summary(Rich.lm)
+anova(Rich.lm)
+
+```
+
+```{r}
+dissim.lm<-lm(Dissimilarity ~ EucDist*Site, data = within_plot)
+summary(dissim.lm)
+anova(dissim.lm)
+```
+
+```{r}
+ggplot(within_plot, aes(x = EucDist, y = Dissimilarity, color = Site))+
+   geom_point()+
+   geom_smooth(method= "lm")
+```
+
+Interaction between Site and Euclidean Distance is significant
+
+# Improving Within Plot Models
+
+In the original study, the only bands that were added: blue, green, red, and near infrared. In addition to those four spectral bands, they also had spectral indices of modified soil adjusted vegetation index 2 (MSAVI2) and coloration index (CI). We calculated these columns, and now are adding the rest of the spectral bands
+
+```{r}
+
+better_sites <- mutate(sites,
+                       site_numeric = as.numeric(as.factor(Site))) %>% 
+  select(-Site)
+write.csv(better_sites, "Sites_better.csv")
+
+```
+
+## PCA
+
+I am replicating the process above, only with more bands. 
+
+```{r}
+pca_better <- prcomp(as.matrix(better_sites[,2:11]), scale = FALSE)
+summary(pca_better)
+plot(pca_better$sdev^2, type = "b", xlab = "Principal Component") 
+
+```
+The elbow in the graph is present at the 2 value which matches our previous, but the angle in the break is more dramatic from 1 to 2. 
+
+```{r}
+biplot(pca_better, scale = 0)
+
+```
+
+```{r, comparison between both the PCA plots}
+par(mfrow = c(1,2))
+
+biplot(pca_better, scale = 0,
+       main = "8 BANDS, MSAVI2, CI")
+
+biplot(pca, scale = 0,
+       main = "4 BANDS, MSAVI2, CI")
+```
+
+```{r}
+if (!is.null(dev.list())) dev.off() # to disable the par function
+```
+
+## Distance
+
+Now we will be extracting the euclidean distance:
+
+```{r, new euclidean distance}
+
+center_coords2 <- matrix(c(
+  0, 0),
+  nrow = 107, ncol = 2, byrow = TRUE)
+
+plot_spec_coords2 <- matrix(c(pca_better$x[,1], pca$x[,2]),
+                   nrow = 107, ncol = 2, byrow = TRUE)
+
+euc_dist2 <- sqrt(pca_better$x[,1]^2 + pca_better$x[,2]^2)
+
+
+```
+
+```{r}
+within_plot$EucDist2 <- euc_dist2
+
+write.csv(within_plot, "Within_plot3.csv")
+
+```
+
+## Models
+
+Models without the interaction between EucDist2 and Site
+
+```{r}
+rich_null <- lmer(Richness ~ 1 + (1|Site),
+             data = within_plot)
+
+
+shannon_null <- lmer(ShanDiv ~ 1 + (1|Site),
+             data = within_plot)
+
+Simp_null <- lmer(InvSimp ~ 1 + (1|Site),
+             data = within_plot)
+
+Dissim_null <- lmer(Dissimilarity ~ 1 + (1|Site),
+             data = within_plot)
+
+```
+
+These are the models without the interaction between Euclidean Distance (EucDist2) and Site
+
+```{r}
+simpson_model2 <- lmer(InvSimp ~ EucDist2 + (1|Site),
+                      data = within_plot)
+summary(simpson_model2)
+anova(simpson_model2)
+```
+
+```{r}
+
+shannon_model2 <- lmer(ShanDiv ~ EucDist2 + (1|Site),
+                      data = within_plot)
+summary(shannon_model2)
+```
+
+```{r}
+dissimilarity_model2 <- lmer(Dissimilarity ~ EucDist2 + (1|Site),
+                      data = within_plot)
+summary(dissimilarity_model2)
+```
+
+```{r}
+richness2 <- lmer(Richness ~ EucDist2 + (1|Site),
+                      data = within_plot)
+summary(richness2)
+```
+
+```{r}
+shannon_2 <-  plot_predictions(shannon_model2,
+                 condition = c("EucDist2", "Site"),
+                 points = 0.5)
+
+
+p1 + shannon_2
+```
+
+```{r}
+simpson_2 <- plot_predictions(simpson_model2,
+                 condition = c("EucDist2", "Site"),
+                 points = 0.5)
+p2 + simpson_2 
+
+```
+
+```{r}
+dissim_2 <- plot_predictions(dissimilarity_model2,
+                 condition = c("EucDist2", "Site"),
+                 points = 0.5)
+
+p3 + dissim_2
+```
+
+```{r}
+richness_2 <- plot_predictions(richness2,
+                 condition = c("EucDist2", "Site"),
+                 points = 0.5)
+
+p4 + richness_2
+```
+
+```{r}
+simp.lm2 <-lm(InvSimp ~ EucDist2*Site, data = within_plot)
+summary(simp.lm2)
+anova(simp.lm2)
+
+summary(simp.lm)
+```
+
+```{r}
+
+Rich.lm2 <-lm(Richness ~ EucDist2*Site, data = within_plot)
+summary(Rich.lm2)
+anova(Rich.lm2)
+```
+
+```{r}
+dissim.lm2 <-lm(Dissimilarity ~ EucDist2*Site, data = within_plot)
+summary(dissim.lm2)
+anova(dissim.lm2)
+```
+
+```{r}
+shannon.lm2 <-lm(ShanDiv ~ EucDist2*Site, data = within_plot)
+summary(dissim.lm2)
+anova(dissim.lm2)
+```
+
+```{r}
+ggplot(within_plot, aes(x = EucDist2, y = ShanDiv, color = Site))+
+   geom_point()+
+   geom_smooth(method= "lm")
+ggplot(within_plot, aes(x = EucDist2, y = InvSimp, color = Site))+
+   geom_point()+
+   geom_smooth(method= "lm")
+ggplot(within_plot, aes(x = EucDist2, y = Richness, color = Site))+
+   geom_point()+
+   geom_smooth(method= "lm")
+ggplot(within_plot, aes(x = EucDist2, y = Dissimilarity, color = Site))+
+   geom_point()+
+   geom_smooth(method= "lm")
+
+# Shannon and Dissimilarity are the ones with the most significance according to their summary tables. Dissimilarity is the one with the least overlap between sites. 
+```
